@@ -1,0 +1,27 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+credentials.json
+.credentials.json
+
+# Langfuse / collector local state
+docker/.env
+data/
+checkpoints/
+*.log
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Local agent state
+.omc/
+__pycache__/
+*.pyc
+
+# contexto privado, fuera del repo publico
+docs/PRIVATE*

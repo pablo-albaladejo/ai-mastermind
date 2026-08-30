@@ -1,0 +1,8 @@
+<clickhouse>
+  <!-- Coexist with a 24 GB host that may also run local LLMs.
+       Without this ClickHouse sizes caches off total RAM and will fight for it. -->
+  <max_server_memory_usage_to_ram_ratio>0.3</max_server_memory_usage_to_ram_ratio>
+  <mark_cache_size>536870912</mark_cache_size>
+  <uncompressed_cache_size>0</uncompressed_cache_size>
+  <profiles><default><max_memory_usage>4000000000</max_memory_usage></default></profiles>
+</clickhouse>

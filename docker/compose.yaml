@@ -1,0 +1,226 @@
+# ai-mastermind — self-hosted Langfuse (Phase 1)
+#
+# Conventions copied from the local-ai-stack repo on the same host:
+#   - internal services use `expose:`, NEVER `ports:` (upstream Langfuse publishes
+#     postgres/redis/clickhouse to the host; that is stripped here)
+#   - named volumes, so `docker compose down` cannot silently drop data
+#   - `restart: unless-stopped` on everything
+#   - images pinned by digest once resolved (see docs/PINS.md)
+#
+# langfuse-web is on host port 3001, NOT 3000: local-ai-stack's open-webui owns 3000
+# and is only stopped, not removed. Avoids a collision if it ever comes back.
+#
+# ClickHouse is the memory floor on this 24 GB host. Capped explicitly below —
+# verify with: docker exec langfuse-clickhouse clickhouse-client --query \
+#   "SELECT value FROM system.server_settings WHERE name='max_server_memory_usage'"
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: langfuse-postgres
+    expose: ["5432"]
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: langfuse
+    volumes:
+      - langfuse-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.12
+    container_name: langfuse-clickhouse
+    expose: ["8123", "9000"]
+    environment:
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DB: default
+      # Coexist with a 24 GB host. Without this ClickHouse sizes itself off total RAM.
+      CLICKHOUSE_SKIP_USER_SETUP: "0"
+    volumes:
+      - langfuse-clickhouse-data:/var/lib/clickhouse
+      - langfuse-clickhouse-logs:/var/log/clickhouse-server
+      - ./clickhouse-memory.xml:/etc/clickhouse-server/config.d/memory.xml:ro
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: langfuse-redis
+    expose: ["6379"]
+    # Langfuse uses Redis as a BullMQ queue, NOT a cache: eviction would silently drop
+    # queued ingestion jobs. maxmemory-policy MUST stay noeviction. This is also why we
+    # do not share local-ai-stack's redis-stack-server, which is tuned to evict.
+    command: >
+      redis-server
+      --requirepass ${REDIS_AUTH}
+      --maxmemory-policy noeviction
+    volumes:
+      - langfuse-redis:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $$REDIS_AUTH ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    environment:
+      REDIS_AUTH: ${REDIS_AUTH}
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    container_name: langfuse-minio
+    # 9090 published so the console is reachable for debugging; API stays internal.
+    expose: ["9000"]
+    ports: ["127.0.0.1:9091:9001"]
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    command: server /data --console-address ":9001"
+    volumes:
+      - langfuse-minio:/data
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  minio-init:
+    # Creates the three buckets Langfuse expects. Runs once, then exits 0.
+    image: minio/mc:latest
+    container_name: langfuse-minio-init
+    depends_on:
+      minio: { condition: service_healthy }
+    environment:
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set lf http://minio:9000 minio $$MINIO_ROOT_PASSWORD &&
+      mc mb --ignore-existing lf/langfuse-events &&
+      mc mb --ignore-existing lf/langfuse-media &&
+      mc mb --ignore-existing lf/langfuse-exports &&
+      echo 'buckets ready'"
+    restart: "no"
+
+  langfuse-worker:
+    image: docker.langfuse.com/langfuse/langfuse-worker:4
+    container_name: langfuse-worker
+    expose: ["3030"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    environment: &langfuse-env
+      DATABASE_URL: postgresql://langfuse:${POSTGRES_PASSWORD}@postgres:5432/langfuse
+      SALT: ${SALT}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      TELEMETRY_ENABLED: "false"
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "true"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: ${REDIS_AUTH}
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse-events
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse-media
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+    restart: unless-stopped
+
+  langfuse-web:
+    image: docker.langfuse.com/langfuse/langfuse:4
+    container_name: langfuse-web
+    ports: ["3001:3000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    environment:
+      <<: *langfuse-env
+      NEXTAUTH_URL: http://localhost:3001
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+      # Single-user instance on a LAN/tailnet: no public signup.
+      AUTH_DISABLE_SIGNUP: "true"
+      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID}
+      LANGFUSE_INIT_ORG_NAME: ai-mastermind
+      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID}
+      LANGFUSE_INIT_PROJECT_NAME: default
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD}
+    healthcheck:
+      # Langfuse binds to the container IP, NOT loopback: localhost:3000 is refused
+      # from inside. $$HOSTNAME resolves to the container's own address.
+      test: ["CMD-SHELL", "wget -qO- http://$$HOSTNAME:3000/api/public/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    restart: unless-stopped
+
+  litellm:
+    # Cursor's route into Langfuse. Cursor cannot be traced from disk the way Claude Code
+    # can, so its traffic has to pass through a proxy that reports. This only takes effect
+    # in Cursor's "own API key" mode, which bypasses its included subscription usage —
+    # verify that trade before relying on it (docs/PLAN.md 3.3).
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: litellm
+    ports: ["4000:4000"]
+    environment:
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY}
+      LANGFUSE_HOST: http://langfuse-web:3000
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://langfuse-web:3000/api/public/otel
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/json
+      OTEL_EXPORTER_OTLP_HEADERS: Authorization=Basic ${LANGFUSE_BASIC_B64}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-unset}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-unset}
+    volumes:
+      - ./litellm-config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    depends_on:
+      langfuse-web: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveness', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  langfuse-postgres:        { name: langfuse-postgres }
+  langfuse-clickhouse-data: { name: langfuse-clickhouse-data }
+  langfuse-clickhouse-logs: { name: langfuse-clickhouse-logs }
+  langfuse-redis:           { name: langfuse-redis }
+  langfuse-minio:           { name: langfuse-minio }

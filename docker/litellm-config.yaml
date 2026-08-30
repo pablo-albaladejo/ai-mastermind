@@ -1,0 +1,33 @@
+# Cursor -> LiteLLM -> provider, with every call reported to the local Langfuse.
+# user/tags are stamped so Cursor traffic is filterable alongside Claude Code.
+model_list:
+  - model_name: cursor-sonnet
+    litellm_params:
+      model: anthropic/claude-sonnet-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+  - model_name: cursor-opus
+    litellm_params:
+      model: anthropic/claude-opus-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+  - model_name: cursor-gpt
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+
+  - model_name: mock-verify
+    # No provider key needed. Exists so the Cursor pipeline (proxy -> Langfuse callback)
+    # can be verified end to end without spending money or holding a real key.
+    litellm_params:
+      model: anthropic/claude-sonnet-5
+      api_key: fake-key-for-mock
+      mock_response: "ok"
+
+litellm_settings:
+  # NOT the built-in "langfuse" callback: it speaks the legacy Ingestion API, which
+  # Langfuse v4 removed in events_only mode. It initializes fine and then every export
+  # fails with "Bad request" — a silent hole. OTLP is the supported path and matches
+  # the rest of this stack.
+  callbacks: ["otel"]
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
