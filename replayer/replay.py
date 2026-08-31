@@ -100,6 +100,30 @@ def usage_details(u: dict) -> dict:
     }
 
 
+
+def repo_from_cwd(cwd: str | None) -> str | None:
+    """Repository name from a working directory.
+
+    basename() is wrong here: inside a git worktree it returns the BRANCH, not the repo.
+    `/Users/x/development/chatbot-kb.worktrees/main` basenames to "main", which was 19% of
+    all spans and meant nothing. Strip the `<repo>.worktrees/<branch>` layer, and also the
+    trailing subdirectory when the session was started below the repo root.
+    """
+    if not cwd:
+        return None
+    parts = [p for p in str(cwd).strip("/").split("/") if p]
+    for i, p in enumerate(parts):
+        if p.endswith(".worktrees"):
+            return p[: -len(".worktrees")]
+    # not a worktree: the repo is the first path element under a known code root
+    for root in ("development", "src", "code", "projects", "repos", "work"):
+        if root in parts:
+            i = parts.index(root)
+            if len(parts) > i + 1:
+                return parts[i + 1]
+    return parts[-1] if parts else None
+
+
 # --- ids ----------------------------------------------------------------------
 def _hex(seed: str, n: int) -> str:
     return hashlib.sha256(seed.encode()).hexdigest()[:n]
@@ -311,9 +335,8 @@ def build_spans(path: Path, root: Path, ledger: Ledger, machine: str,
             start = end
 
         tags = ["claude-code", machine, acct, kind]
-        repo = None
-        if d.get("cwd"):
-            repo = os.path.basename(str(d["cwd"]).rstrip("/"))
+        repo = repo_from_cwd(d.get("cwd"))
+        if repo:
             tags.append(f"repo:{repo}")
 
         a = [

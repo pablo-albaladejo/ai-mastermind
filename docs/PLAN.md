@@ -952,3 +952,64 @@ Single-block responses get a **zero-width** span rather than an invented duratio
 Cursor: **deliberately not traced.** Reaching it would cost both the included
 subscription usage and a publicly exposed proxy (§8.5). The mock wildcard was removed
 from `litellm-config.yaml` so it cannot mask real traffic later.
+
+### 8.8 The repo tag was the branch
+
+`cc.repo` was derived with `basename(cwd)`. Inside a git worktree that returns the
+**branch**, not the repository:
+
+```
+/…/development/chatbot-kb.worktrees/main            ->  "main"       (wrong)
+/…/development/chatbot-kb.worktrees/conv-ai-settings->  "conv-ai-…"  (wrong)
+```
+
+`repo:main` was the single largest tag at 27,284 spans — **19% of the corpus, meaning
+nothing** — and `repo:conv-ai-settings`, `repo:next-actions`, `repo:onboarding` were
+branches too. Fixed by stripping the `<repo>.worktrees/<branch>` layer and resolving the
+first element under a known code root. One repo's traffic went from being split across
+five meaningless tags to a single honest one:
+
+```
+before: repo:main 27,284 · repo:conv-ai-settings 25,998 · repo:chatbot-kb 14,110
+        · repo:chatbot-kb.worktrees 7,962 · repo:next-actions 3,216
+after:  repo:chatbot-kb 63,230
+```
+
+Two operational notes from doing the correction:
+
+- **The cleanup DELETE blew ClickHouse's memory cap** (2.33 GiB, set deliberately in
+  `clickhouse-memory.xml`): the `NOT IN (SELECT … GROUP BY …)` aggregates the whole table.
+  It half-completed. Redone **per partition**, which keeps each aggregation small — that
+  is the pattern to reuse for any future correction pass.
+- The full path survives in `attributes.cc.cwd`, so this was fixable without re-reading a
+  single transcript. **Keep the raw value next to every derived one**; the derivation is
+  what turned out to be wrong, not the data.
+
+### 8.9 What the employer's telemetry does and does not carry
+
+Asked directly, so verified across every config layer rather than assumed.
+
+**Never sent, at any setting:** working directory, repository name, git branch. The docs
+list these as not tracked; there is no variable that enables them.
+
+**Always sent, not optional:** `organization.id`, `user.email`, `user.account_uuid`,
+`user.account_id`, `user.id`, `session.id`, `terminal.type` — identity, timing, volume and
+model, but not subject matter.
+
+**Redacted by default**, each behind its own opt-in: prompt text
+(`OTEL_LOG_USER_PROMPTS`), response text (`OTEL_LOG_ASSISTANT_RESPONSES`), bash commands
+and **file paths** (`OTEL_LOG_TOOL_DETAILS`), tool input/output (`OTEL_LOG_TOOL_CONTENT`),
+and the entire conversation as raw JSON (`OTEL_LOG_RAW_API_BODIES`).
+
+Measured on this host: **none of the five is set** — not in the org's remote settings, not
+in user settings, not in managed settings (absent), not in the live environment. Content is
+therefore not leaving.
+
+Two caveats worth keeping:
+
+1. **Those switches are controlled by whoever pushes the remote settings, not by the
+   user.** The posture can change without any local action. Re-check with:
+   `grep -o 'OTEL_LOG_[A-Z_]*' ~/.claude/remote-settings.json`
+2. `OTEL_LOG_TOOL_DETAILS` would send **file paths**. The repo name is never sent, but a
+   path implies it — so the "repo is never sent" guarantee is weaker than it sounds if
+   that one switch is ever flipped.
