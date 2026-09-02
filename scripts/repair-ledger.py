@@ -43,7 +43,24 @@ for line in LEDGER.read_text().splitlines():
               f"{before} -> {d['account']}")
     rows.append(d)
 
-LEDGER.write_text("".join(json.dumps(d) + "\n" for d in rows))
-print(f"  {changed} relabelled of {len(rows)} · backup at {LEDGER}.bak")
+# Collapse redundant entries. The ledger records account CHANGES, so for one directory
+# two consecutive entries naming the same account carry no information — they are the
+# artefact of a watcher restart under the pre-2026-09-03 bug, which compared against the
+# last line of the whole file instead of the last line for its own directory. Keeping the
+# earliest of each run preserves the real transition timestamps, which is what the
+# replayer joins on.
+rows.sort(key=lambda d: d["observed_at"])
+kept, last_by_dir = [], {}
+for d in rows:
+    key = d.get("config_dir")
+    if last_by_dir.get(key) == d.get("accountUuid"):
+        continue
+    last_by_dir[key] = d.get("accountUuid")
+    kept.append(d)
+dropped = len(rows) - len(kept)
+
+LEDGER.write_text("".join(json.dumps(d) + "\n" for d in kept))
+print(f"  {changed} relabelled, {dropped} redundant dropped, {len(kept)} kept "
+      f"· backup at {LEDGER}.bak")
 if changed:
     print("  -> re-run replay-all.sh so the corrected labels reach Langfuse")
