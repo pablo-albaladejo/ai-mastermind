@@ -82,11 +82,19 @@ def main():
     led = Path(args.ledger)
     led.parent.mkdir(parents=True, exist_ok=True)
 
+    # Per config_dir, NOT the last line of the file. Several watchers share one ledger,
+    # so comparing against whatever directory happened to write last makes every restart
+    # look like an account change and append an entry that never happened. That matters:
+    # where a directory has held more than one account the replayer attributes by joining
+    # this ledger on time, so a spurious entry silently relabels real spans.
     last_uuid = None
     if led.exists():
         for line in led.read_text().splitlines():
-            if line.strip():
-                last_uuid = json.loads(line).get("accountUuid")
+            if not line.strip():
+                continue
+            e = json.loads(line)
+            if e.get("config_dir") == str(cfg):
+                last_uuid = e.get("accountUuid")
 
     def record(acct):
         entry = {

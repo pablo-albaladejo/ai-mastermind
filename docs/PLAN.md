@@ -1013,3 +1013,30 @@ Two caveats worth keeping:
 2. `OTEL_LOG_TOOL_DETAILS` would send **file paths**. The repo name is never sent, but a
    path implies it — so the "repo is never sent" guarantee is weaker than it sounds if
    that one switch is ever flipped.
+
+### 8.10 The ledger's change detection ignored which directory it was watching
+
+`last_uuid` was read from the **last line of the whole ledger**, not the last line for the
+directory being watched. Several watchers share one ledger file, so on startup each one
+compared its own account against whichever directory happened to write last. If they
+differed — which is the normal case, that being the entire point of separate profiles —
+it appended an entry recording an account change that never happened.
+
+Observed live: restarting the two watchers on the laptop made one of them write a
+spurious entry immediately.
+
+This is worse than noise. Where a directory has held more than one account the replayer
+attributes spans by **joining this ledger on time**, so a fabricated entry silently
+relabels every span after its timestamp. The mechanism built to make attribution
+trustworthy was itself able to corrupt it.
+
+Fixed by scoping the comparison to `config_dir`. Verified: three alternating `--once`
+invocations across two directories now append nothing; before the fix the same sequence
+wrote three entries.
+
+A pattern worth naming, since it has now appeared four times in this work: **the record
+was always right and the conclusion drawn from it was wrong.** The ledger held the correct
+email and organization in every entry; the label on top was wrong. The transcripts held
+the correct `usage`; the sum over them was wrong. `cc.cwd` held the correct path; the repo
+derived from it was wrong. Keep the raw observation next to every derived value — every
+one of these was repairable precisely because the raw value had been kept.
