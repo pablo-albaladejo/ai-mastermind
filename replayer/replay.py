@@ -259,6 +259,7 @@ def build_spans(path: Path, root: Path, ledger: Ledger, machine: str,
                 account: str | None = None):
     kind, wf = classify(path, root)
     by_msg: dict[str, dict] = {}
+    tools_by_msg: dict[str, list[str]] = {}
     meta = {}
     errors = []
 
@@ -285,6 +286,17 @@ def build_spans(path: Path, root: Path, ledger: Ledger, machine: str,
             continue
         tot = (u.get("input_tokens", 0) + u.get("output_tokens", 0)
                + u.get("cache_read_input_tokens", 0) + u.get("cache_read_input_tokens", 0))
+        # tool_use is a PER-BLOCK field: each record of one response carries a different
+        # block. Dedup keeps a single record, so the tools have to be gathered from all
+        # of them BEFORE that choice, or they are lost. Names only — arguments carry the
+        # work itself (bash commands, file paths) and stay out by default.
+        blocks = m.get("content")
+        if isinstance(blocks, list):
+            names = [b.get("name") for b in blocks
+                     if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name")]
+            if names:
+                tools_by_msg.setdefault(mid, []).extend(names)
+
         prev = by_msg.get(mid)
         if prev is None or tot >= prev["_tot"]:
             by_msg[mid] = {"_tot": tot, "d": d, "u": u, "m": m,
@@ -368,6 +380,11 @@ def build_spans(path: Path, root: Path, ledger: Ledger, machine: str,
                 a.append(attr(k, d[src]))
         if wf:
             a.append(attr("cc.workflow_id", wf))
+        tools = tools_by_msg.get(m["id"]) or []
+        if tools:
+            # de-duplicated for the label, counted raw so repeated calls still show
+            a.append(attr("cc.tools", sorted(set(tools))))
+            a.append(attr("cc.tool_count", len(tools)))
         # gitBranch is captured but useless as a tag: 81.9% of spans read "HEAD".
         # Kept as an attribute, never promoted to a tag.
         if d.get("gitBranch"):

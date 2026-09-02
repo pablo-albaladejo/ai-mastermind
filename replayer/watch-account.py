@@ -49,11 +49,23 @@ def read_account(config_dir: Path) -> dict | None:
     return None
 
 
-def label(acct: dict, override: str | None) -> str:
+def label(acct: dict, override: str | None = None) -> str:
+    """work vs personal, derived from the account itself.
+
+    A fixed --label cannot be right: one config dir can hold different accounts over
+    time (observed: ~/.claude was a work account until 2026-09-01, personal after), and
+    a flag pinned at watcher-start would mislabel everything on the other side of the
+    switch. Personal Claude accounts name their org after their own email; a real
+    company org does not.
+    """
     if override:
         return override
-    org = (acct.get("organizationName") or "").strip().lower().replace(" ", "-")
-    return f"claude-{org}" if org else "claude-personal"
+    org = (acct.get("organizationName") or "").strip().lower()
+    email = (acct.get("emailAddress") or "").strip().lower()
+    local = email.split("@")[0] if email else ""
+    if local and local in org:
+        return "claude-personal"
+    return "claude-work" if org else "claude-personal"
 
 
 def main():
@@ -61,7 +73,7 @@ def main():
     ap.add_argument("--config-dir", default=os.environ.get("CLAUDE_CONFIG_DIR",
                                                            os.path.expanduser("~/.claude")))
     ap.add_argument("--ledger", default=os.path.expanduser("~/.ai-mastermind/account-ledger.jsonl"))
-    ap.add_argument("--label", help="force the account label (else derived from org name)")
+    ap.add_argument("--label", help="override the derived label; normally leave unset")
     ap.add_argument("--interval", type=float, default=5.0)
     ap.add_argument("--once", action="store_true", help="record current state and exit")
     args = ap.parse_args()
