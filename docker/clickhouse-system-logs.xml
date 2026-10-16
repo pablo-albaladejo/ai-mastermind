@@ -1,0 +1,66 @@
+<clickhouse>
+  <!-- Bound ClickHouse's OWN telemetry. Companion to clickhouse-memory.xml, which
+       caps memory on this 24 GB host; this file caps the other two resources the
+       same box was losing: CPU and disk.
+
+       Measured 2026-09-19, container up 5 days:
+
+         system.*  (ClickHouse's own debug telemetry)  81.87 GiB   4,449,899,327 rows
+         Langfuse  (the data you actually keep)           223.50 MiB       732,090 rows
+
+       No system log table had a TTL, so they grew without bound, and ClickHouse sat
+       at 242-1396% CPU perpetually merging system.text_log and system.part_log.
+       From the host it looked like "the Docker VM is burning cores"; the VM was
+       innocent, this was. A week later text_log had grown from 27 to 48 GiB.
+
+       Three levers, in order of impact:
+
+       1. text_log <level>: the shipped default is `trace`, i.e. every server log
+          line at maximum verbosity is INSERTed into a MergeTree table. That is the
+          ingest rate behind the merges. `warning` keeps what is worth reading.
+       2. trace_log removed: query-profiler stack samples, 50 GiB, never read in a
+          local Langfuse. Re-enable by deleting the <trace_log remove="1"/> line.
+       3. A 3-day TTL on every remaining log table.
+
+       Gotchas, both hit while writing this file:
+       - opentelemetry_span_log is left alone on purpose. It is the one table the
+         shipped config gives an explicit <engine>, and ClickHouse refuses to start
+         (Code 36, restart loop) if a sibling <ttl> is added next to an <engine>.
+         It is small (~57 MiB). processors_profile_log already ships with a TTL.
+       - Do NOT apply retention with ALTER TABLE ... MODIFY TTL instead: on start,
+         ClickHouse compares each system log table against the definition built
+         from this config and, if they differ, renames the old table aside
+         (text_log -> text_log_0) and creates a fresh one. Retention has to live
+         here to survive a restart. Those renamed *_log_N tables are dead weight;
+         drop them after a config change. -->
+
+  <trace_log remove="1"/>
+
+  <!-- Removed 2026-10-16. With the TTLs above disk stayed bounded, but CPU did not:
+       after 20 days ClickHouse sat at 490-625% CPU with resident memory (2.95 GiB)
+       above its own cap (2.33 GiB, i.e. 0.3 of the 7.75 GiB Docker VM, not of the
+       host), so every query failed with MEMORY_LIMIT_EXCEEDED and no merge had
+       completed in the last hour. 14.4M merges since start (~8/s), 604 billion
+       merged rows, against ~220 MiB of Langfuse data. Two tables drove it:
+       - metric_log: a snapshot of every metric every few seconds; a very wide
+         table that is expensive to merge.
+       - part_log: one row per merge, which then has to be merged itself; it
+         feeds on the merges it records (5M rows within the 3-day TTL).
+       Nothing reads these in a local Langfuse; re-enable by deleting a line.
+       ClickHouse does not drop a removed log table: drop it by hand after the
+       restart. -->
+  <metric_log remove="1"/>
+  <part_log remove="1"/>
+  <query_metric_log remove="1"/>
+  <asynchronous_metric_log remove="1"/>
+
+  <text_log>
+    <level>warning</level>
+    <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+  </text_log>
+
+  <query_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></query_log>
+  <query_thread_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></query_thread_log>
+  <error_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></error_log>
+  <query_views_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></query_views_log>
+</clickhouse>
