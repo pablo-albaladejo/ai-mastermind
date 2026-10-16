@@ -36,17 +36,31 @@
 
   <trace_log remove="1"/>
 
+  <!-- Removed 2026-10-16. With the TTLs above disk stayed bounded, but CPU did not:
+       after 20 days ClickHouse sat at 490-625% CPU with resident memory (2.95 GiB)
+       above its own cap (2.33 GiB, i.e. 0.3 of the 7.75 GiB Docker VM, not of the
+       host), so every query failed with MEMORY_LIMIT_EXCEEDED and no merge had
+       completed in the last hour. 14.4M merges since start (~8/s), 604 billion
+       merged rows, against ~220 MiB of Langfuse data. Two tables drove it:
+       - metric_log: a snapshot of every metric every few seconds; a very wide
+         table that is expensive to merge.
+       - part_log: one row per merge, which then has to be merged itself; it
+         feeds on the merges it records (5M rows within the 3-day TTL).
+       Nothing reads these in a local Langfuse; re-enable by deleting a line.
+       ClickHouse does not drop a removed log table: drop it by hand after the
+       restart. -->
+  <metric_log remove="1"/>
+  <part_log remove="1"/>
+  <query_metric_log remove="1"/>
+  <asynchronous_metric_log remove="1"/>
+
   <text_log>
     <level>warning</level>
     <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
   </text_log>
 
-  <part_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></part_log>
-  <metric_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></metric_log>
-  <asynchronous_metric_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></asynchronous_metric_log>
   <query_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></query_log>
   <query_thread_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></query_thread_log>
   <error_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></error_log>
-  <query_metric_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></query_metric_log>
   <query_views_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></query_views_log>
 </clickhouse>
